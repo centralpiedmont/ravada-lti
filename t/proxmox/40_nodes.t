@@ -110,7 +110,7 @@ sub test_base_shared_storage($node2) {
     is($display->{ip}, '192.0.2.12', "display in pve2");
     $clone->shutdown_now($USER);
 
-    # a volatile clone is balanced to the node with more free memory
+    # a volatile clone is balanced to a node where the base is enabled
     $base->volatile_clones(1);
     my $name_v = new_domain_name();
     $req = Ravada::Request->clone(uid => $USER->id, id_domain => $base->id, name => $name_v
@@ -120,8 +120,11 @@ sub test_base_shared_storage($node2) {
     my $volatile = rvd_back->search_domain($name_v);
     ok($volatile, "volatile clone") or return;
     ok($volatile->is_active, "volatile clone running");
-    is($volatile->node, 'pve2', "balanced to the node with more free memory") or diag($volatile->node);
-    is(Ravada::Front::Domain->open($volatile->id)->node, 'pve2', "node stored");
+    # Ravada picks the first idle node in random order, both are valid
+    like($volatile->node, qr/^pve[12]$/, "balanced to a node with the base: ".$volatile->node);
+    is($vm->_node_of_vmid($volatile->vmid), $volatile->node, "clone really lives there");
+    is(Ravada::Front::Domain->open($volatile->id)->node, $volatile->node, "node stored");
+    is(Ravada::Domain->open($volatile->id)->_vm->node, $volatile->node, "opened from its node");
     $req = Ravada::Request->shutdown_domain(uid => user_admin->id, id_domain => $volatile->id, timeout => 2);
     wait_request(check_error => 0);
     $req = Ravada::Request->refresh_machine(uid => user_admin->id, id_domain => $volatile->id);
