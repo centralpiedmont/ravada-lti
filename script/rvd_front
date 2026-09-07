@@ -1101,7 +1101,8 @@ get '/iso_file.json' => sub {
     return access_denied($c) unless _logged_in($c)
         && $USER->can_create_machine();
     my @isos =('<NONE>');
-    push @isos,(@{$RAVADA->iso_file('KVM')});
+    my $vm_type = ($c->param('vm_type') or $RAVADA->list_vm_types->[0] or 'KVM');
+    push @isos,(@{$RAVADA->iso_file($vm_type)});
     $c->render(json => \@isos);
 };
 
@@ -4088,7 +4089,7 @@ sub req_new_domain {
     my $c = shift;
     my $name = $c->param('name');
     my $swap = ($c->param('swap') or 0);
-    my $vm = ( $c->param('backend') or 'KVM');
+    my $vm = ( $c->param('backend') or $RAVADA->list_vm_types->[0] or 'KVM');
     $swap = int($swap * 1024*1024*1024);
     my $bios = $c->param('bios');
     my $hardware = $c->param('hardware');
@@ -4123,7 +4124,7 @@ sub req_new_domain {
     $args{memory} = int($c->param('memory')*1024*1024)  if $c->param('memory');
     $args{disk} = int($c->param('disk')*1024*1024*1024) if $c->param('disk');
     $args{id_template} = $c->param('id_template')   if $vm =~ /^LX/;
-    $args{id_iso} = $c->param('id_iso')             if $vm eq 'KVM';
+    $args{id_iso} = $c->param('id_iso')             if $vm !~ /^LX/;
     $args{storage} = $c->param('storage');
 
     return $RAVADA->create_domain(%args);

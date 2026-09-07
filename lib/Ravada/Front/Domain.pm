@@ -16,6 +16,7 @@ use Moose;
 
 use Ravada::Front::Domain::KVM;
 use Ravada::Front::Domain::Void;
+use Ravada::Front::Domain::Proxmox;
 
 no warnings "experimental::signatures";
 use feature qw(signatures);
@@ -56,10 +57,11 @@ sub BUILD($self, $arg) {
 sub open($self, $id) {
     confess "Error: undefined id" if !defined $id;
     my $domain = Ravada::Front::Domain->new( id => $id );
-    if ($domain->type eq 'KVM') {
-        $domain = Ravada::Front::Domain::KVM->new( id => $id );
-    } elsif ($domain->type eq 'Void') {
-        $domain = Ravada::Front::Domain::Void->new( id => $id );
+    my $type = $domain->type;
+    $type = 'KVM' if $type && $type eq 'qemu';
+    if ($type) {
+        my $class = "Ravada::Front::Domain::$type";
+        $domain = $class->new( id => $id ) if $class->can('new');
     }
     confess "ERROR: Unknown domain id: $id\n"
         unless exists $domain->{_data}->{name} && $domain->{_data}->{name};

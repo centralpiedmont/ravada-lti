@@ -21,7 +21,7 @@
                     ></select>
                 </div>
             </div>
-            <div ng-show="backend == 'KVM' || backend == 'Void'" class="form-group">
+            <div ng-show="backend == 'KVM' || backend == 'Void' || backend == 'Proxmox'" class="form-group">
                 <div class="from-group row">
                     <label for="id_iso" class="col-xl-3 col-form-label"><%=l 'Select Template' %> <a
                       title="Choose the OS you want to install."><i class="fa fa-info-circle"></i></a></label>
@@ -94,7 +94,7 @@
                 </div>
             </div>
 
-            <div class="form-group row" ng-show="backend == 'KVM' || backend == 'LXC'">
+            <div class="form-group row" ng-show="backend == 'KVM' || backend == 'LXC' || backend == 'Proxmox'">
                     <label for="memory" class="col-xl-3 col-form-label"><%=l 'Ram: (GB)' %></label>
                     <div class="col-lg-2">
                             <input class="form-control" ng-model="ramSize" type="number" min ="{{id_iso.min_ram}}" name="memory">
@@ -106,7 +106,7 @@
 
             </div>
 
-            <div class="form-group row" ng-show="backend == 'KVM' || backend =='Void'">
+            <div class="form-group row" ng-show="backend == 'KVM' || backend == 'Void' || backend == 'Proxmox'">
                 <label for="disk" class="col-xl-3 col-form-label"><%=l 'System Disk: (GB)' %></label>
                 <div class="col-lg-2">
                     <input class="form-control" ng-model="ddsize" type="number" min ="{{min_size}}" name="disk" required="">
@@ -158,7 +158,7 @@
                 <input type="text" ng-show="false" name="storage" ng-model="storage_pool.name"/>
             </div>
 
-            <div class="form-group row" ng-show="backend == 'KVM' || backend=='Void'">
+            <div class="form-group row" ng-show="backend == 'KVM' || backend == 'Void' || backend == 'Proxmox'">
                 <div class="col-xl-3" align="right">
                 <label for="swap">
                     <span ng-model="swap.label"
@@ -185,7 +185,7 @@
                     <span><%=l 'Content will be cleaned on restore and shutdown' %></span>
                </div>
             </div>
-            <div class="form-group row" ng-show="backend == 'KVM' || backend=='Void'">
+            <div class="form-group row" ng-show="backend == 'KVM' || backend == 'Void' || backend == 'Proxmox'">
                 <div class="col-xl-3" align="right">
                 <label for="swap">
                     <span ng-model="data.label"

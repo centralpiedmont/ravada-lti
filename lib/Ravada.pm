@@ -52,12 +52,33 @@ eval {
 };
 $ERROR_VM{Void} = $@;
 
+eval {
+    require Ravada::VM::Proxmox and do {
+        Ravada::VM::Proxmox->import;
+    };
+    $VALID_VM{Proxmox} = 1;
+};
+$ERROR_VM{Proxmox} = $@;
+
 no warnings "experimental::signatures";
 use feature qw(signatures);
 
 our %VALID_CONFIG = (
     vm => undef
     ,warn_error => undef
+    ,proxmox => {
+        url => undef
+        ,token_id => undef
+        ,token_secret => undef
+        ,user => undef
+        ,password => undef
+        ,node => undef
+        ,nodes => undef
+        ,storage => undef
+        ,bridge => undef
+        ,insecure => undef
+        ,ca => undef
+    }
     ,db => {user => undef, password => undef,  hostname => undef, host => undef, db => undef}
     ,ldap => { admin_user => { dn => undef, password => undef }
         ,filter => undef
@@ -1169,6 +1190,12 @@ sub _add_domain_drivers_display($self) {
             ,'spice'
             ,{name => 'x2go', data => 22 }
             ,{name => 'Windows RDP', value => 'rdp' , data => $port_rdp }
+        ]
+        ,'Proxmox' => [
+            'spice'
+            ,'vnc'
+            ,{name => 'x2go', data => 22 }
+            ,{name => 'Windows RDP', value => 'rdp', data => $port_rdp}
         ]
     );
 
@@ -2382,6 +2409,15 @@ sub _sql_create_tables($self) {
             ,xml => 'TEXT'
             }
         ]
+        ,[
+            domains_proxmox => {
+            id => 'integer NOT NULL PRIMARY KEY AUTO_INCREMENT'
+            ,id_domain => 'integer NOT NULL references `domains` (`id`) ON DELETE CASCADE'
+            ,vmid => 'integer DEFAULT NULL'
+            ,node => 'varchar(64) DEFAULT NULL'
+            ,config => 'TEXT'
+            }
+        ]
         ,
         [   groups_local => {
                 id => 'integer PRIMARY KEY AUTO_INCREMENT',
@@ -2671,7 +2707,7 @@ sub _clean_db_leftovers($self) {
     my $dbh = $CONNECTOR->dbh;
     for my $table (
         'access_ldap_attribute','domain_access'
-        ,'domain_displays' , 'domain_ports', 'volumes', 'domains_void', 'domains_kvm', 'domain_instances', 'bases_vm', 'domain_access', 'base_xml', 'file_base_images', 'iptables', 'domains_network') {
+        ,'domain_displays' , 'domain_ports', 'volumes', 'domains_void', 'domains_kvm', 'domains_proxmox', 'domain_instances', 'bases_vm', 'domain_access', 'base_xml', 'file_base_images', 'iptables', 'domains_network') {
         my $sth2 = $CONNECTOR->dbh->table_info('%',undef, $table,'TABLE');
         my $info = $sth2->fetchrow_hashref();
         $sth2->finish;
@@ -3294,6 +3330,8 @@ sub _init_config {
     if ( !$CONFIG->{vm} ) {
         my %default_vms = %VALID_VM;
         delete $default_vms{Void};
+        # Proxmox needs an API endpoint configured, do not enable it by default
+        delete $default_vms{Proxmox} if !$CONFIG->{proxmox};
         $CONFIG->{vm} = [keys %default_vms];
     }
     #    lock_hash(%$CONFIG);
@@ -3425,6 +3463,14 @@ sub _create_vm_void {
     return Ravada::VM::Void->new( connector => ( $self->connector or $CONNECTOR ));
 }
 
+sub _create_vm_proxmox {
+    my $self = shift;
+    die "Proxmox backend not available\n".($ERROR_VM{Proxmox} or '')
+    if !exists $VALID_VM{Proxmox} || !$VALID_VM{Proxmox};
+
+    return Ravada::VM::Proxmox->new_from_config($CONFIG->{proxmox});
+}
+
 sub _create_vm($self, $type=undef) {
 
     # TODO: add a _create_vm_default for VMs that just are created with ->new
@@ -3433,6 +3479,7 @@ sub _create_vm($self, $type=undef) {
         'KVM' => \&_create_vm_kvm
         ,'LXC' => \&_create_vm_lxc
         ,'Void' => \&_create_vm_void
+        ,'Proxmox' => \&_create_vm_proxmox
     );
 
     my @vms = ();
@@ -3746,6 +3793,11 @@ sub remove_domain {
     my $domain;
     eval { $domain = Ravada::Domain->open(id => $id, _force => 1, id_vm => $vm->id) };
     warn $@ if $@;
+    if (!$domain) {
+        # try the node where the domain is stored
+        eval { $domain = Ravada::Domain->open(id => $id, _force => 1) };
+        warn $@ if $@;
+    }
     if (!$domain) {
             warn "Warning: I can't find domain [$id ] '$name' in ".$vm->name.", maybe already removed.\n";
             Ravada::Domain::_remove_domain_data_db($id);
@@ -6126,7 +6178,8 @@ sub _cmd_connect_node($self, $request) {
     $request->_data(output => "Ping ok. Trying to connect to $hostname");
     my ($out, $err);
     eval {
-        ($out, $err) = $node->run_command('/bin/true');
+        ($out, $err) = $node->run_command('/bin/true')
+        unless $node->can('needs_ssh') && !$node->needs_ssh;
     };
     $err = $@ if $@ && !$err;
     warn "out: $out" if $out;
@@ -6947,7 +7000,8 @@ sub search_vm {
 
     confess "Missing VM type"   if !$type;
 
-    my $class = 'Ravada::VM::'.uc($type);
+    $type = 'KVM' if $type =~ /^(kvm|qemu)$/i;
+    my $class = 'Ravada::VM::'.$type;
 
     if ($type =~ /Void/i) {
         return Ravada::VM::Void->new(host => $host);

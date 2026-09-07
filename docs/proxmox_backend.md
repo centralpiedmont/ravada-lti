@@ -33,6 +33,72 @@ stay on the same storage), volumes (Ravada works with file paths and
 (Ravada's templates are libvirt XML fragments). Each is solvable, and each is
 discussed below.
 
+## Implementation Status
+
+The backend described below is implemented in this branch and exercised
+against an in-process mock of the Proxmox API in `t/proxmox/`. What works
+today:
+
+- `Ravada::VM::Proxmox`, `Ravada::Domain::Proxmox`,
+  `Ravada::Front::Domain::Proxmox` and `Ravada::Volume::Proxmox`, plus the
+  API client `Ravada::Proxmox::API` (API token or user and password
+  authentication, task polling) and its mock `Ravada::Proxmox::API::Mock`.
+- One `vms` row per cluster node. The node named in the `proxmox` section is
+  stored as `localhost` so Ravada treats it as the main node; nodes listed in
+  `nodes` get their own row. Connection settings are stored in
+  `vms.connection_args`.
+- Creating machines from an ISO (ISO download through the storage
+  `download-url` call), system, swap and data disks, memory and CPU changes,
+  network interfaces on bridges, disk resize, display driver switch between
+  SPICE (`vga: qxl`) and VNC.
+- Lifecycle: start, ACPI shutdown, forced stop, reboot, pause, resume,
+  hibernate (suspend to disk), rename, autostart, remove.
+- SPICE access through the Proxmox `spiceproxy` ticket. The `.vv` file is
+  requested from the API when the user downloads it, in `rvd_front`, using the
+  connection settings stored for the node. No firewall rule is opened on the
+  node.
+- Bases as templates and clones as linked clones, with a full clone fallback
+  when the storage does not support linked clones. `remove_base` removes the
+  template flag. Dettach and spinoff replace the machine by a full clone.
+  Volatile clones are removed by the usual refresh path after the grace
+  period.
+- Migration between nodes through the API, online when the machine is
+  running, copying local disks when the storage is not shared.
+- Discovery and import of machines that already exist in the cluster.
+- The guest IP through the QEMU guest agent.
+
+Not implemented yet: host devices (PCI, USB, mediated devices), Proxmox
+SDN networks (bridges only, `has_networking` is off), screenshots, backups
+and compaction (both are Proxmox features), snapshots.
+
+Configuration example:
+
+```yaml
+vm:
+  - Proxmox
+proxmox:
+  url: https://pve.example.com:8006
+  token_id: ravada@pve!rvd
+  token_secret: 00000000-0000-0000-0000-000000000000
+  node: pve1
+  nodes:
+    - pve2
+  storage: local
+  bridge: vmbr0
+  insecure: 0
+  ca: /etc/ssl/certs/pve-ca.pem
+```
+
+`user` and `password` can be used instead of the token. `insecure: 1`
+skips the TLS verification of the API certificate. The token needs
+`VM.Allocate`, `VM.Clone`, `VM.Config.*`, `VM.PowerMgmt`, `VM.Console`,
+`VM.Audit`, `VM.Migrate`, `Datastore.AllocateSpace`,
+`Datastore.AllocateTemplate`, `Datastore.Audit` and `Sys.Audit`.
+
+The tests run with `prove -lr t/proxmox`. The mock keeps its state in
+`/var/tmp/rvd_proxmox_mock/<user>/<name>.yml`, selected by a url like
+`mock://name` in the config.
+
 ## How The Backend Abstraction Works Today
 
 `Ravada::VM` (`lib/Ravada/VM.pm`) is the virtual manager role. It declares 13
