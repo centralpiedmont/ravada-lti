@@ -19,6 +19,11 @@ The client only requirements are: a web-browser and a remote viewer supporting t
 In the current release we use the
 KVM Hypervisors: [KVM](http://www.linux-kvm.org/) as the backend for the Virtual Machines.
 
+This fork also includes a [Proxmox VE](https://www.proxmox.com/) backend that
+manages the virtual machines through the Proxmox REST API. See
+[docs/proxmox_backend.md](docs/proxmox_backend.md) for the configuration
+and the current status.
+
 ### Features
 
 - KVM backend for Windows and Linux Virtual machines

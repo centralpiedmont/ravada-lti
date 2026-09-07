@@ -2776,7 +2776,7 @@ sub _remove_domain_data_db($id, $type=undef) {
     for my $table (
         'access_ldap_attribute','domain_access'
         ,'host_devices_domain'
-        ,'domain_displays' , 'domain_ports', 'volumes', 'domains_void', 'domains_kvm', 'domain_instances', 'bases_vm', 'domain_access', 'base_xml', 'file_base_images', 'iptables', 'domains_network') {
+        ,'domain_displays' , 'domain_ports', 'volumes', 'domains_void', 'domains_kvm', 'domains_proxmox', 'domain_instances', 'bases_vm', 'domain_access', 'base_xml', 'file_base_images', 'iptables', 'domains_network') {
         my $sth = $$CONNECTOR->dbh->prepare("DELETE FROM $table WHERE id_domain=?");
         $sth->execute($id);
     }

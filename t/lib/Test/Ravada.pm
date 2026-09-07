@@ -2746,7 +2746,7 @@ sub _check_removed_nbd {
 sub _check_leftovers_domains {
     for my $table (
         'access_ldap_attribute','domain_access'
-        ,'domain_displays' , 'domain_ports', 'volumes', 'domains_void', 'domains_kvm', 'domain_instances', 'bases_vm', 'domain_access', 'base_xml', 'file_base_images', 'iptables', 'domains_network') {
+        ,'domain_displays' , 'domain_ports', 'volumes', 'domains_void', 'domains_kvm', 'domains_proxmox', 'domain_instances', 'bases_vm', 'domain_access', 'base_xml', 'file_base_images', 'iptables', 'domains_network') {
         my $sth;
         eval {
             $sth = $CONNECTOR->dbh->prepare("SELECT * FROM $table WHERE id_domain NOT IN "

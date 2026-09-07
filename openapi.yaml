@@ -1035,7 +1035,7 @@ paths:
                   type: string
                   description: Type of virtual machine hypervisor
                   example: "KVM"
-                  enum: [KVM, LXC, Void]
+                  enum: [KVM, LXC, Void, Proxmox]
                 hostname:
                   type: string
                   description: Fully qualified domain name or IP address of the node
