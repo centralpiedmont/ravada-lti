@@ -39,6 +39,7 @@ has 'insecure' => ( is => 'ro', isa => 'Bool', default => 0 );
 has 'ca' => ( is => 'ro', isa => 'Maybe[Str]' );
 has 'timeout' => ( is => 'ro', isa => 'Int', default => 30 );
 has 'task_timeout' => ( is => 'rw', isa => 'Int', default => 600 );
+has 'retries' => ( is => 'rw', isa => 'Int', default => 2 );
 
 our %VALID_ARGS = map { $_ => 1 }
     qw(url token_id token_secret user password insecure ca timeout task_timeout);
@@ -136,6 +137,21 @@ Dies with a L<Ravada::Proxmox::API::Error> on failure.
 =cut
 
 sub request($self, $method, $path, $params = {}) {
+    my $tries = 1;
+    $tries += $self->retries if $method eq 'GET';
+    my $result;
+    for my $try ( 1 .. $tries ) {
+        eval { $result = $self->_request($method, $path, $params) };
+        my $err = $@;
+        return $result if !$err;
+        # retry only when there was no answer at all from the server
+        die $err if $try == $tries || !ref($err) || $err->code;
+        $self->_sleep(1);
+    }
+    return $result;
+}
+
+sub _request($self, $method, $path, $params = {}) {
     my $ua = $self->_ua;
     my $headers = $self->_headers($method);
     my $url = Mojo::URL->new($self->_full_url($path));

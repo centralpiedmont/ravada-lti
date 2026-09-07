@@ -878,6 +878,114 @@ sub dettach($self, $user=undef) {
     $self->_replace_with_full_clone();
 }
 
+=head2 _client_connection_status
+
+The viewer connects through the Proxmox spice proxy in the node, the
+established connections are not visible from the Ravada backend. Running
+machines are reported as connected so they are never shut down for a
+false disconnection.
+
+=cut
+
+sub _client_connection_status($self, $force=undef) {
+    return 'connected';
+}
+
+=head2 rsync
+
+Nothing to synchronize, the Proxmox API moves the disks on migration
+
+=cut
+
+sub rsync($self, @args) {
+    return;
+}
+
+sub _rsync_volumes_back($self, $node, $request=undef) {
+    return;
+}
+
+sub has_non_shared_storage($self, $node=undef) {
+    return 0;
+}
+
+sub _local_storage_volumes($self) {
+    my @local;
+    for my $vol ($self->list_volumes_info( device => 'disk' )) {
+        my ($storage) = $vol->file =~ /^([^:]+):/;
+        next if !$storage;
+        push @local, ($vol->file) if !$self->_vm->_storage_is_shared($storage);
+    }
+    return @local;
+}
+
+=head2 set_base_vm
+
+Enables or disables this base in a node of the cluster. A template can
+be cloned from any node when its disks are in shared storage, nothing
+is copied.
+
+=cut
+
+sub set_base_vm($self, %args) {
+    my $id_vm = delete $args{id_vm};
+    my $value = delete $args{value};
+    my $user  = delete $args{user};
+    my $vm    = delete $args{vm};
+    my $node  = delete $args{node};
+    my $request = delete $args{request};
+
+    confess "ERROR: Unknown arguments, valid are id_vm, value, user, node and vm "
+        .Dumper(\%args) if keys %args;
+    confess "ERROR: Supply either id_vm or vm argument"
+        if (!$id_vm && !$vm && !$node) || ($id_vm && $vm) || ($id_vm && $node)
+            || ($vm && $node);
+    confess "ERROR: user required"  if !$user;
+
+    $vm = $node if $node;
+    $vm = Ravada::VM->open($id_vm)  if !$vm;
+    die "Error: VM ".Ravada::VM::_search_name($id_vm)." not available\n"
+        if !$vm || !$vm->is_active || !$vm->vm;
+
+    $value = 1 if !defined $value;
+    my $id_request;
+    $id_request = $request->id if $request;
+    $request->status("working") if $request;
+
+    if ($vm->node eq $self->node) {
+        if (!$value) {
+            $self->remove_base($user) if $self->is_base;
+        } else {
+            $self->prepare_base($user) if !$self->is_base;
+        }
+    } elsif ($value) {
+        $self->prepare_base($user) if !$self->is_base;
+        my @local = $self->_local_storage_volumes();
+        die "Error: base ".$self->name." has volumes in local storage: "
+            .join(", ", @local).". It can not be cloned from node ".$vm->node
+            .", move the disks to a shared storage.\n" if @local;
+        $self->_check_all_parents_in_node($vm);
+    }
+    $self->_set_base_vm_db($vm->id, $value, $id_request);
+    return $self->_set_base_vm_db($vm->id, $value);
+}
+
+=head2 expose
+
+Port exposure is done with NAT rules in the hypervisor, it is not
+available for Proxmox machines. They are reachable through the bridge.
+
+=cut
+
+sub expose($self, @args) {
+    die "Error: exposing ports is not available for Proxmox virtual machines,"
+        ." they are reachable through the bridge network.\n";
+}
+
+sub open_exposed_ports($self, $remote_ip=undef) {
+    return;
+}
+
 sub migrate($self, $node, $request=undef) {
     my $api = $self->_api;
     my $target = $node->node;

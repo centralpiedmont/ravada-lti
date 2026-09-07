@@ -87,16 +87,27 @@ sub new_from_config($class, $config=undef) {
     my $vm = $class->new();
     $vm->_store_connection_args(\%conn);
 
-    for my $node (@{ $conn{nodes} or [] }) {
-        next if $conn{node} && $node eq $conn{node};
-        my $other = $class->new( host => $node );
-        $other->_store_connection_args(\%conn);
-    }
-
     my $client;
     eval { $client = $vm->vm };
     warn $@ if $@;
     return if !$client;
+
+    my @nodes;
+    my $nodes = $conn{nodes};
+    if (defined $nodes && !ref($nodes) && $nodes =~ /^(all|\*)$/i) {
+        my $list = $client->get('/nodes');
+        @nodes = map { $_->{node} } @$list;
+    } elsif (ref($nodes) eq 'ARRAY') {
+        @nodes = @$nodes;
+    } elsif (defined $nodes) {
+        @nodes = split /\s*,\s*/, $nodes;
+    }
+    for my $node (@nodes) {
+        next if !$node || $node eq $vm->node;
+        my $other = $class->new( host => $node );
+        $other->_store_connection_args(\%conn);
+    }
+
     return $vm;
 }
 
@@ -104,6 +115,7 @@ sub _store_connection_args($self, $conn) {
     return if !$self->store;
     my %store = %$conn;
     delete $store{nodes};
+    delete $store{node} if !$self->is_local;
     $self->_data('connection_args' => JSON::XS->new->canonical->encode(\%store));
     my $default = $self->_data('default_storage');
     if ($conn->{storage} && (!$default || $default eq 'default')) {
@@ -168,6 +180,12 @@ sub _connect($self) {
         $self->_data('cached_down' => time) if $self->store && !$self->is_local;
         return;
     }
+    # nodes added from the frontend have no connection settings stored yet
+    if ($self->store) {
+        my $stored;
+        eval { $stored = $self->_data('connection_args') };
+        $self->_store_connection_args($conn) if !$stored;
+    }
     return $client;
 }
 
@@ -227,6 +245,16 @@ sub run_command($self, @command) {
 }
 
 sub _fetch_dir_cert { return '' }
+
+=head2 iptables_list
+
+Ravada manages no firewall rules in Proxmox nodes, returns an empty list
+
+=cut
+
+sub iptables_list($self) {
+    return {};
+}
 
 sub get_library_version($self) {
     my $data = $self->_cached('version', sub { $self->vm->get('/version') });
@@ -818,6 +846,29 @@ sub import_domain($self, $name, $user, $spinoff=undef) {
     return $domain;
 }
 
+=head2 search_base
+
+Returns a base domain wherever it is in the cluster. Templates in
+shared storage can be cloned from any node.
+
+=cut
+
+sub search_base($self, $id_base) {
+    my $base = $self->search_domain_by_id($id_base);
+    return $base if $base;
+
+    my $sth = $$CONNECTOR->dbh->prepare(
+        "SELECT name, internal_id FROM domains WHERE id=?"
+    );
+    $sth->execute($id_base);
+    my ($name, $vmid) = $sth->fetchrow;
+    $sth->finish;
+    return if !$name || !$vmid;
+
+    my $node = $self->_node_of_vmid($vmid) or return;
+    return $self->_new_domain($vmid, $node, $name);
+}
+
 sub _next_vmid($self) {
     my $vmid = $self->vm->get('/cluster/nextid');
     return $vmid + 0;
@@ -866,8 +917,8 @@ sub create_domain($self, %args) {
 
     my $domain;
     if ($id_base) {
-        my $base = $self->search_domain_by_id($id_base)
-            or confess "Error: I can't find base domain id=$id_base";
+        my $base = $self->search_base($id_base)
+            or confess "Error: I can't find base domain id=$id_base in the cluster";
         my %params = ( newid => $vmid, name => $pve_name );
         $params{description} = $description if $description;
         $params{target} = $self->node if $base->node ne $self->node;

@@ -63,13 +63,25 @@ today:
   Volatile clones are removed by the usual refresh path after the grace
   period.
 - Migration between nodes through the API, online when the machine is
-  running, copying local disks when the storage is not shared.
+  running, copying local disks when the storage is not shared. Nothing is
+  rsynced, and a migration request with `start` starts the machine in the
+  chosen node.
+- Multi-node: a template whose disks are on shared storage can be enabled
+  in other nodes (the Nodes tab of the base, `set_base_vm`), clones are then
+  created directly in the node picked by Ravada's balancing as linked clones
+  with a target node. A template on local storage is refused with a message
+  saying which volumes to move. Nodes can be added from the Nodes page of the
+  admin with only the node name, the connection check does not need ssh, and
+  `nodes: all` in the config registers every node of the cluster.
 - Discovery and import of machines that already exist in the cluster.
 - The guest IP through the QEMU guest agent.
 
 Not implemented yet: host devices (PCI, USB, mediated devices), Proxmox
 SDN networks (bridges only, `has_networking` is off), screenshots, backups
-and compaction (both are Proxmox features), snapshots.
+and compaction (both are Proxmox features), snapshots, port exposure
+(machines are on a bridge, `expose` refuses with a message) and the
+client connection check (running machines always report as connected, so
+"shutdown when disconnected" does not apply).
 
 Configuration example:
 
@@ -90,7 +102,9 @@ proxmox:
 ```
 
 `user` and `password` can be used instead of the token. `insecure: 1`
-skips the TLS verification of the API certificate. The token needs
+skips the TLS verification of the API certificate. `nodes` accepts a list
+of node names or `all`. `display_host` overrides the address written in
+the SPICE file when clients reach the nodes through another name. The token needs
 `VM.Allocate`, `VM.Clone`, `VM.Config.*`, `VM.PowerMgmt`, `VM.Console`,
 `VM.Audit`, `VM.Migrate`, `Datastore.AllocateSpace`,
 `Datastore.AllocateTemplate`, `Datastore.Audit` and `Sys.Audit`.
