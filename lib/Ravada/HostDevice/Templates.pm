@@ -285,9 +285,62 @@ our @TEMPLATES_VOID = (
 
 );
 
+# Proxmox devices are listed through the API by Ravada::VM::Proxmox with
+# the pve-list-* pseudo commands. The templates are JSON fragments of the
+# machine configuration, the key without index is allocated by the domain.
+our @TEMPLATES_PROXMOX = (
+    {
+        name => "USB device"
+        ,list_command => "pve-list-usb"
+        ,list_filter => "ID "
+        ,template_args => encode_json({
+                usb_id => 'ID ([a-f0-9]+:[a-f0-9]+)'
+            })
+        ,templates => [
+            {
+                path => "/usb"
+                ,type => 'unique_node'
+                ,template => '{"usb":"host=<%= $usb_id %>"}'
+            }
+        ]
+    }
+    ,{
+        name => 'PCI'
+        ,list_command => 'pve-list-pci'
+        ,list_filter => ''
+        ,template_args => encode_json({
+                pci => '^([0-9a-f]+:[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+) '
+            })
+        ,templates => [
+            {
+                path => "/hostpci"
+                ,type => 'unique_node'
+                ,template => '{"hostpci":"<%= $pci %>"}'
+            }
+        ]
+    }
+    ,{
+        name => 'GPU Mediated Device'
+        ,list_command => 'pve-list-mdev'
+        ,list_filter => 'mdev='
+        ,template_args => encode_json({
+                pci => '^([0-9a-f]+:[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+) '
+                ,mdev => 'mdev=([^ ]+)'
+            })
+        ,templates => [
+            {
+                path => "/hostpci"
+                ,type => 'unique_node'
+                ,template => '{"hostpci":"<%= $pci %>,mdev=<%= $mdev %>"}'
+            }
+        ]
+    }
+);
+
 my %TEMPLATES = (
     'KVM' => \@TEMPLATES_KVM
     ,'Void' => \@TEMPLATES_VOID
+    ,'Proxmox' => \@TEMPLATES_PROXMOX
 );
 
 sub _vm_name($id) {

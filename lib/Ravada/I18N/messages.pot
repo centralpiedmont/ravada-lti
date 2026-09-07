@@ -2726,3 +2726,6 @@ msgstr ""
 
 msgid "Later"
 msgstr ""
+
+msgid "Open console in the browser"
+msgstr ""

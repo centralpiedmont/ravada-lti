@@ -1250,8 +1250,38 @@ sub add_config_node($self, $path, $content, $data) {
     return;
 }
 
+our %HOSTDEV_MAX = ( hostpci => 15, usb => 4 );
+
+sub _hostdev_key($path) {
+    my ($prefix) = $path =~ m{^/?(hostpci|usb)$};
+    return $prefix;
+}
+
+sub _hostdev_same($a, $b) {
+    my ($id_a) = split /,/, $a;
+    my ($id_b) = split /,/, $b;
+    return $id_a eq $id_b;
+}
+
 sub add_config_unique_node($self, $path, $content, $data) {
-    return $self->add_config_node($path, $content, $data);
+    my $prefix = _hostdev_key($path);
+    return $self->add_config_node($path, $content, $data) if !$prefix;
+
+    my $content_hash = $content;
+    $content_hash = decode_json($content) if !ref($content);
+    my $value = $content_hash->{$prefix};
+    confess "Error: missing $prefix in ".Dumper($content_hash) if !defined $value;
+
+    for my $key (grep { /^$prefix\d+$/ } keys %$data) {
+        return if _hostdev_same($data->{$key}, $value);
+    }
+    for my $n (0 .. $HOSTDEV_MAX{$prefix}) {
+        my $key = "$prefix$n";
+        next if exists $data->{$key};
+        $data->{$key} = $value;
+        return;
+    }
+    die "Error: no free $prefix slot in ".$self->name."\n";
 }
 
 sub set_config_node($self, $path, $content, $data) {
@@ -1262,6 +1292,14 @@ sub set_config_node($self, $path, $content, $data) {
 sub remove_config_node($self, $path, $content, $data) {
     my $content_hash = $content;
     $content_hash = decode_json($content) if !ref($content);
+    my $prefix = _hostdev_key($path);
+    if ($prefix) {
+        my $value = $content_hash->{$prefix};
+        for my $key (grep { /^$prefix\d+$/ } keys %$data) {
+            delete $data->{$key} if defined $value && _hostdev_same($data->{$key}, $value);
+        }
+        return;
+    }
     my ($found, $parent, $last) = _config_walk($data, $path);
     return if !ref($parent);
     if (ref($found) eq 'HASH') {
@@ -1278,7 +1316,58 @@ sub change_config_attribute($self, $path, $content, $data) {
 sub change_namespace { }
 sub remove_namespace { }
 
-sub can_host_devices { return 0 }
+sub can_host_devices { return 1 }
+
+=head2 list_snapshots
+
+Returns the snapshots of the virtual machine
+
+=cut
+
+sub list_snapshots($self) {
+    my $list = $self->_api->get($self->_path('/snapshot'));
+    return grep { $_->{name} ne 'current' } @$list;
+}
+
+=head2 create_snapshot
+
+Creates a snapshot of the virtual machine
+
+    $domain->create_snapshot($name, $description, $vmstate);
+
+=cut
+
+sub create_snapshot($self, $name, $description='', $vmstate=0) {
+    die "Error: invalid snapshot name '$name'\n" if $name !~ /^[a-zA-Z][a-zA-Z0-9_\-]*$/;
+    my %params = ( snapname => $name, description => $description );
+    $params{vmstate} = 1 if $vmstate;
+    $self->_post('/snapshot', \%params);
+}
+
+=head2 remove_snapshot
+
+Removes a snapshot
+
+=cut
+
+sub remove_snapshot($self, $name) {
+    my $upid = $self->_api->delete($self->_path("/snapshot/$name"));
+    $self->_wait($upid);
+}
+
+=head2 rollback_snapshot
+
+Restores the virtual machine to a snapshot. It is shut down first.
+
+=cut
+
+sub rollback_snapshot($self, $name, $start=0) {
+    $self->_do_force_shutdown() if $self->is_active;
+    my %params;
+    $params{start} = 1 if $start;
+    $self->_post("/snapshot/$name/rollback", \%params);
+    $self->_refresh_config();
+}
 
 sub remove_host_devices($self, @) {
     my $config = $self->pve_config(1);

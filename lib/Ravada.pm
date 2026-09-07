@@ -78,6 +78,8 @@ our %VALID_CONFIG = (
         ,bridge => undef
         ,insecure => undef
         ,ca => undef
+        ,sdn_zone => undef
+        ,display_host => undef
     }
     ,db => {user => undef, password => undef,  hostname => undef, host => undef, db => undef}
     ,ldap => { admin_user => { dn => undef, password => undef }

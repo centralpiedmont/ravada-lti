@@ -25,6 +25,7 @@ returned instead. It is used by the test suite.
 
 use Carp qw(confess croak);
 use Data::Dumper;
+use Mojo::URL;
 use Moose;
 
 no warnings "experimental::signatures";
@@ -112,6 +113,34 @@ sub _login($self) {
     $self->{_ticket} = $data->{ticket};
     $self->{_csrf} = $data->{CSRFPreventionToken};
     $self->{_ticket_time} = time;
+}
+
+=head2 auth_headers
+
+Returns the HTTP headers that authenticate a request, for example to
+open a websocket to the API from another client.
+
+=cut
+
+sub auth_headers($self, $method='GET') {
+    return $self->_headers($method);
+}
+
+=head2 websocket_url
+
+Returns the websocket url of an API path with its query parameters
+
+=cut
+
+sub websocket_url($self, $path, $params={}) {
+    my $url = Mojo::URL->new($self->_full_url($path));
+    $url->query(%$params) if keys %$params;
+    my $scheme = $url->scheme;
+    $scheme = 'wss' if $scheme eq 'https';
+    $scheme = 'ws' if $scheme eq 'http';
+    $scheme = 'wss' if $scheme eq 'mock';
+    $url->scheme($scheme);
+    return $url->to_string;
 }
 
 sub _headers($self, $method) {
