@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title><%= $name %></title>
+    <style>
+        body { margin: 0; background: #000; color: #ccc; font-family: sans-serif; }
+        #status { position: absolute; top: 0; left: 0; right: 0; padding: 4px 8px; background: #222; font-size: 13px; }
+        #screen { position: absolute; top: 26px; left: 0; right: 0; bottom: 0; }
+    </style>
+</head>
+<body>
+    <div id="status"><%= $name %></div>
+    <div id="screen"></div>
+    <script type="module">
+        import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
+        const scheme = (location.protocol === 'https:' ? 'wss://' : 'ws://');
+        const url = scheme + location.host + '/ws/console/<%= $id %>';
+        const status = document.getElementById('status');
+        const rfb = new RFB(document.getElementById('screen'), url, { wsProtocols: ['binary'] });
+        rfb.scaleViewport = true;
+        rfb.resizeSession = false;
+        rfb.addEventListener('connect', () => { status.textContent = '<%= $name %>'; });
+        rfb.addEventListener('disconnect', (e) => {
+            status.textContent = '<%= $name %> : ' + (e.detail.clean ? 'disconnected' : 'connection lost');
+        });
+    </script>
+</body>
+</html>

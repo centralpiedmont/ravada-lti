@@ -37,6 +37,10 @@ my $RE_DISK = qr/^(scsi|virtio|ide|sata|efidisk|tpmstate)(\d+)$/;
 
 sub is_mock { return 1 }
 
+sub auth_headers($self, $method='GET') {
+    return { Accept => 'application/json', 'X-Mock-Auth' => 1 };
+}
+
 sub _sleep { }
 
 sub _name($self) {
@@ -84,6 +88,39 @@ sub _default_state {
                      ,{ iface => 'vmbr1', cidr => '10.0.0.11/24', address => '10.0.0.11' } ]
             ,pve2 => [ { iface => 'vmbr0', cidr => '192.0.2.12/24', address => '192.0.2.12' }
                      ,{ iface => 'vmbr1', cidr => '10.0.0.12/24', address => '10.0.0.12' } ]
+        }
+        ,hardware => {
+            pci => [
+                { id => '0000:01:00.0', vendor => '0x10de', device => '0x1c82', class => '0x030000'
+                    , vendor_name => 'NVIDIA Corporation', device_name => 'GP107 [GeForce GTX 1050 Ti]'
+                    , iommugroup => 1, mdev => 1 }
+                ,{ id => '0000:02:00.0', vendor => '0x10de', device => '0x1c82', class => '0x030000'
+                    , vendor_name => 'NVIDIA Corporation', device_name => 'GP107 [GeForce GTX 1050 Ti]'
+                    , iommugroup => 2, mdev => 1 }
+                ,{ id => '0000:03:00.0', vendor => '0x8086', device => '0x10d3', class => '0x020000'
+                    , vendor_name => 'Intel Corporation', device_name => '82574L Gigabit Network Connection'
+                    , iommugroup => 3 }
+                ,{ id => '0000:00:00.0', vendor => '0x8086', device => '0x3e30', class => '0x060000'
+                    , vendor_name => 'Intel Corporation', device_name => 'Host bridge', iommugroup => 0 }
+            ]
+            ,usb => [
+                { busnum => 1, devnum => 1, vendid => '1d6b', prodid => '0002', class => 9
+                    , manufacturer => 'Linux Foundation', product => '2.0 root hub', usbpath => '1' }
+                ,{ busnum => 1, devnum => 3, vendid => '0781', prodid => '5567', class => 0
+                    , manufacturer => 'SanDisk Corp.', product => 'Cruzer Blade', usbpath => '1-3' }
+                ,{ busnum => 1, devnum => 4, vendid => '046d', prodid => 'c52b', class => 0
+                    , manufacturer => 'Logitech', product => 'Unifying Receiver', usbpath => '1-4' }
+            ]
+            ,mdev => {
+                '0000:01:00.0' => [ { type => 'nvidia-63', name => 'GRID P4-1Q', available => 2, description => 'num_heads=4, frl_config=60' } ]
+                ,'0000:02:00.0' => [ { type => 'nvidia-63', name => 'GRID P4-1Q', available => 2, description => 'num_heads=4, frl_config=60' } ]
+            }
+        }
+        ,sdn => {
+            zones => { ravada => { type => 'simple', dhcp => 'dnsmasq', ipam => 'pve' } }
+            ,vnets => {}
+            ,subnets => {}
+            ,applied => 1
         }
         ,vms => {}
         ,tasks => {}
@@ -193,6 +230,9 @@ sub _dispatch($self, $state, $method, $path, $params) {
     if ($path eq '/nodes' && $method eq 'GET') {
         return [ map { $self->_node_info($state, $_) } sort keys %{$state->{nodes}} ];
     }
+    if ($path =~ m{^/cluster/sdn(/.*)?$}) {
+        return $self->_dispatch_sdn($state, $method, ($1 or ''), $params, $path);
+    }
 
     my ($node, $rest) = $path =~ m{^/nodes/([^/]+)(/.*)?$};
     _error(501, "Not implemented in mock: $mp", $method, $path) if !$node;
@@ -208,6 +248,16 @@ sub _dispatch($self, $state, $method, $path, $params) {
     if ($rest eq '/network') {
         my @list = map { { %$_, type => 'bridge', active => 1, autostart => 1 } }
             @{$state->{bridges}->{$node}};
+        for my $vnet (sort keys %{$state->{sdn}->{vnets}}) {
+            push @list, { iface => $vnet, type => 'bridge', active => 1, autostart => 1, sdn => 1 };
+        }
+        return \@list;
+    }
+    if ($rest =~ m{^/hardware/pci/([^/]+)/mdev$}) {
+        return ($state->{hardware}->{mdev}->{$1} or []);
+    }
+    if ($rest =~ m{^/hardware/(pci|usb)$}) {
+        my @list = map { { %$_ } } @{$state->{hardware}->{$1}};
         return \@list;
     }
     if ($rest eq '/capabilities/qemu/machines') {
@@ -222,8 +272,6 @@ sub _dispatch($self, $state, $method, $path, $params) {
         return [ map { { name => $_, vendor => 'default', custom => 0 } }
             qw(host kvm64 qemu64 x86-64-v2-AES x86-64-v3 max) ];
     }
-    return [] if $rest =~ m{^/hardware/(pci|usb)$};
-
     if ($rest =~ m{^/tasks/([^/]+)/(status|log)$}) {
         my $task = $state->{tasks}->{$1}
             or _error(500, "no such task '$1'", $method, $path);
@@ -309,6 +357,112 @@ sub _cluster_resources($self, $state, $params) {
         }
     }
     return \@list;
+}
+
+##########################################################################
+# sdn
+
+sub _dispatch_sdn($self, $state, $method, $rest, $params, $path) {
+    my $sdn = $state->{sdn};
+    if ($rest eq '' && $method eq 'PUT') {
+        $sdn->{applied} = 1;
+        return $self->_new_task($state, (sort keys %{$state->{nodes}})[0], 'reloadnetworkall', undef);
+    }
+    if ($rest eq '/zones' && $method eq 'GET') {
+        return [ map { { zone => $_, %{$sdn->{zones}->{$_}} } } sort keys %{$sdn->{zones}} ];
+    }
+    if ($rest eq '/vnets') {
+        if ($method eq 'GET') {
+            return [ map { { vnet => $_, %{$sdn->{vnets}->{$_}} } } sort keys %{$sdn->{vnets}} ];
+        }
+        if ($method eq 'POST') {
+            my $name = $params->{vnet} or _error(400, "missing vnet", $method, $path);
+            _error(400, "invalid vnet name '$name'", $method, $path)
+                if $name !~ /^[a-z][a-z0-9]{0,7}$/;
+            _error(400, "vnet '$name' already exists", $method, $path) if $sdn->{vnets}->{$name};
+            my $zone = $params->{zone} or _error(400, "missing zone", $method, $path);
+            _error(400, "zone '$zone' does not exist", $method, $path) if !$sdn->{zones}->{$zone};
+            $sdn->{vnets}->{$name} = { zone => $zone, alias => ($params->{alias} or ''), type => 'vnet' };
+            $sdn->{subnets}->{$name} = {};
+            $sdn->{applied} = 0;
+            return;
+        }
+    }
+    if ($rest =~ m{^/vnets/([^/]+)(/.*)?$}) {
+        my ($name, $rest2) = ($1, ($2 or ''));
+        my $vnet = $sdn->{vnets}->{$name}
+            or _error(500, "vnet '$name' does not exist", $method, $path);
+        if ($rest2 eq '') {
+            return { vnet => $name, %$vnet } if $method eq 'GET';
+            if ($method eq 'PUT') {
+                $vnet->{alias} = $params->{alias} if exists $params->{alias};
+                $sdn->{applied} = 0;
+                return;
+            }
+            if ($method eq 'DELETE') {
+                _error(500, "vnet '$name' still has subnets", $method, $path)
+                    if keys %{$sdn->{subnets}->{$name}};
+                for my $vm (values %{$state->{vms}}) {
+                    for my $key (grep { /^net\d+$/ } keys %{$vm->{config}}) {
+                        _error(500, "vnet '$name' is used by VM $vm->{vmid}", $method, $path)
+                            if $vm->{config}->{$key} =~ /bridge=\Q$name\E(,|$)/;
+                    }
+                }
+                delete $sdn->{vnets}->{$name};
+                delete $sdn->{subnets}->{$name};
+                $sdn->{applied} = 0;
+                return;
+            }
+        }
+        if ($rest2 eq '/subnets') {
+            if ($method eq 'GET') {
+                return [ map { { subnet => $_, %{$sdn->{subnets}->{$name}->{$_}} } }
+                    sort keys %{$sdn->{subnets}->{$name}} ];
+            }
+            if ($method eq 'POST') {
+                my $cidr = $params->{subnet} or _error(400, "missing subnet", $method, $path);
+                my ($ip, $prefix) = $cidr =~ m{^(\d+\.\d+\.\d+\.\d+)/(\d+)$}
+                    or _error(400, "invalid subnet '$cidr'", $method, $path);
+                my $id = "$vnet->{zone}-$ip-$prefix";
+                _error(400, "subnet '$id' already exists", $method, $path)
+                    if $sdn->{subnets}->{$name}->{$id};
+                my $range = $params->{'dhcp-range'};
+                $range = [ $range ] if defined $range && !ref($range);
+                $sdn->{subnets}->{$name}->{$id} = {
+                    cidr => $cidr, type => 'subnet', zone => $vnet->{zone}, vnet => $name
+                    ,gateway => $params->{gateway}, snat => ($params->{snat} or 0)
+                    ,'dhcp-range' => ($range or [])
+                    ,network => $ip, mask => $prefix
+                };
+                $sdn->{applied} = 0;
+                return;
+            }
+        }
+        if ($rest2 =~ m{^/subnets/([^/]+)$}) {
+            my $id = $1;
+            my $subnet = $sdn->{subnets}->{$name}->{$id}
+                or _error(500, "subnet '$id' does not exist", $method, $path);
+            return { subnet => $id, %$subnet } if $method eq 'GET';
+            if ($method eq 'PUT') {
+                for my $key (qw(gateway snat)) {
+                    $subnet->{$key} = $params->{$key} if exists $params->{$key};
+                }
+                if (exists $params->{'dhcp-range'}) {
+                    my $range = $params->{'dhcp-range'};
+                    $range = [ $range ] if !ref($range);
+                    $subnet->{'dhcp-range'} = $range;
+                }
+                $sdn->{applied} = 0;
+                return;
+            }
+            if ($method eq 'DELETE') {
+                delete $sdn->{subnets}->{$name}->{$id};
+                $sdn->{applied} = 0;
+                return;
+            }
+        }
+    }
+    _error(501, "Not implemented in mock: $method $path", $method, $path);
 }
 
 ##########################################################################
@@ -549,8 +703,21 @@ sub _dispatch_qemu($self, $state, $node, $method, $rest, $params, $path) {
         return $self->_new_task($state, $node, 'qmsnapshot', $vmid);
     }
     if ($rest2 =~ m{^/snapshot/([^/]+)$} && $method eq 'DELETE') {
+        _error(500, "snapshot '$1' does not exist", $method, $path) if !$vm->{snapshots}->{$1};
         delete $vm->{snapshots}->{$1};
         return $self->_new_task($state, $node, 'qmdelsnapshot', $vmid);
+    }
+    if ($rest2 =~ m{^/snapshot/([^/]+)/rollback$} && $method eq 'POST') {
+        my $snap = $vm->{snapshots}->{$1}
+            or _error(500, "snapshot '$1' does not exist", $method, $path);
+        $vm->{status} = 'stopped';
+        $vm->{qmpstatus} = 'stopped';
+        if ($snap->{vmstate} && $params->{start}) {
+            $vm->{status} = 'running';
+            $vm->{qmpstatus} = 'running';
+        }
+        $vm->{config}->{parent} = $1;
+        return $self->_new_task($state, $node, 'qmrollback', $vmid);
     }
 
     _error(501, "Not implemented in mock: $method $path", $method, $path);

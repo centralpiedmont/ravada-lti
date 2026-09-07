@@ -1800,6 +1800,66 @@ get '/machine/display/(:driver)/(:id).(#extension)' => sub {
     }
 };
 
+get '/machine/console/(:id)' => sub($c) {
+    return access_denied($c) if !_logged_in($c);
+    my $id = $c->stash('id');
+    my $domain = $RAVADA->search_domain_by_id($id);
+    return $c->render(text => "unknown machine id=$id") if !$domain;
+
+    return access_denied($c)
+        unless $USER->id eq $domain->id_owner
+        || $USER->is_admin
+        || $USER->can_view_all
+    ;
+    return not_found($c) if !$domain->can('console_websocket');
+
+    $c->stash(id => $id, name => $domain->alias);
+    return $c->render(template => 'main/machine_console');
+};
+
+websocket '/ws/console/(:id)' => sub($c) {
+    $USER = _logged_in($c) if !$USER;
+    return access_denied_user($c) if !$USER;
+
+    my $id = $c->stash('id');
+    my $domain = $RAVADA->search_domain_by_id($id);
+    return $c->finish(1008 => "unknown machine id=$id") if !$domain;
+
+    return $c->finish(1008 => 'access denied')
+        unless $USER->id eq $domain->id_owner
+        || $USER->is_admin
+        || $USER->can_view_all
+    ;
+    return $c->finish(1008 => 'console not available') if !$domain->can('console_websocket');
+
+    my ($url, $headers, $options);
+    eval { ($url, $headers, $options) = $domain->console_websocket() };
+    if ($@) {
+        warn $@;
+        return $c->finish(1011 => 'console ticket failed');
+    }
+    $c->inactivity_timeout(3600);
+
+    my $ua = Mojo::UserAgent->new(inactivity_timeout => 3600, request_timeout => 30);
+    $ua->insecure(1) if $options->{insecure};
+    $ua->ca($options->{ca}) if $options->{ca};
+    $c->stash(console_ua => $ua);
+
+    $ua->websocket($url => $headers => ['binary'] => sub($ua, $tx) {
+        if (!$tx->is_websocket) {
+            warn "Error: console websocket to Proxmox failed: ".($tx->res->code or '')." "
+                .($tx->res->message or '');
+            $c->finish(1011 => 'upstream console failed');
+            return;
+        }
+        $c->stash(console_tx => $tx);
+        $tx->on(binary => sub($tx, $bytes) { $c->send({binary => $bytes}) });
+        $tx->on(finish => sub { $c->finish });
+        $c->on(binary => sub($c, $bytes) { $tx->send({binary => $bytes}) });
+        $c->on(finish => sub { $tx->finish });
+    });
+};
+
 sub _display_file_rdp($c, $domain, $extension, $display) {
     $c->res->headers->content_type('application/x-rdp');
         $c->res->headers->content_disposition(

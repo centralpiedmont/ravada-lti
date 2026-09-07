@@ -61,6 +61,10 @@
             </li>
             <li ng-show="display.extra.tls_port"><b><%=l 'Display Port secure :' %></b> {{display.extra.tls_port}} </li>
         </ul>
+        <div ng-show="domain.is_active && domain.type == 'Proxmox'">
+            <a type="button" class="btn btn-primary" target="_blank"
+                href="/machine/console/{{domain.id}}"><b><%=l 'Open console in the browser' %></b></a>
+        </div>
         <div ng-show="domain.is_active && display.is_active && display.file_extension && display.file_extension.length>0">
             <div>
 

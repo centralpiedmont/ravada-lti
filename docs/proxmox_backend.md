@@ -63,13 +63,45 @@ today:
   Volatile clones are removed by the usual refresh path after the grace
   period.
 - Migration between nodes through the API, online when the machine is
-  running, copying local disks when the storage is not shared.
+  running, copying local disks when the storage is not shared. Nothing is
+  rsynced, and a migration request with `start` starts the machine in the
+  chosen node.
+- Multi-node: a template whose disks are on shared storage can be enabled
+  in other nodes (the Nodes tab of the base, `set_base_vm`), clones are then
+  created directly in the node picked by Ravada's balancing as linked clones
+  with a target node. A template on local storage is refused with a message
+  saying which volumes to move. Nodes can be added from the Nodes page of the
+  admin with only the node name, the connection check does not need ssh, and
+  `nodes: all` in the config registers every node of the cluster.
 - Discovery and import of machines that already exist in the cluster.
 - The guest IP through the QEMU guest agent.
 
-Not implemented yet: host devices (PCI, USB, mediated devices), Proxmox
-SDN networks (bridges only, `has_networking` is off), screenshots, backups
-and compaction (both are Proxmox features), snapshots.
+- Host devices: PCI passthrough, USB passthrough and GPU mediated devices
+  as `hostpciN` and `usbN` entries, with the devices listed through the
+  hardware API of the node (no ssh). They use Ravada's host device
+  templates, locking and per node availability like the KVM ones.
+- Virtual networks on Proxmox SDN when `sdn_zone` names a simple zone with
+  DHCP: `new_network`, `create_network`, `change_network` and
+  `remove_network` create vnets with a subnet, gateway, SNAT for the NAT
+  forward mode and a DHCP range, then apply the SDN configuration.
+  Interfaces on a vnet are reported as NAT so the networking mode of the
+  machine (nat or isolated) works as with KVM. Without a zone the bridges
+  of the node are offered and networking management is off.
+- Snapshots: `list_snapshots`, `create_snapshot`, `remove_snapshot` and
+  `rollback_snapshot` on the domain. Ravada has no snapshot request or UI
+  yet, these are backend methods.
+- Browser console: `/machine/console/<id>` opens a noVNC page and
+  `/ws/console/<id>` relays the websocket to the `vncwebsocket` endpoint of
+  the node with a fresh `vncproxy` ticket, so no port of the node other than
+  8006 has to be reachable from the client. The link is in the machine
+  displays panel. noVNC is loaded from jsdelivr.
+
+Not implemented: screenshots, backups and compaction (both are Proxmox
+features), port exposure (machines are on a bridge, `expose` refuses with a
+message) and the client connection check (running machines always report as
+connected, so "shutdown when disconnected" does not apply). The websocket
+relay of the console is exercised only up to the ticket and url with the
+mock, it needs a real cluster to validate end to end.
 
 Configuration example:
 
@@ -90,7 +122,13 @@ proxmox:
 ```
 
 `user` and `password` can be used instead of the token. `insecure: 1`
-skips the TLS verification of the API certificate. The token needs
+skips the TLS verification of the API certificate. `nodes` accepts a list
+of node names or `all`. `display_host` overrides the address written in
+the SPICE file when clients reach the nodes through another name.
+`sdn_zone` names the SDN zone (a simple zone with DHCP enabled) where
+Ravada creates its virtual networks. The token then also needs
+`SDN.Allocate`, `SDN.Use` and `Sys.Modify` (to apply the SDN
+configuration), and `Mapping.Use` or `VM.Config.HWType` for host devices. The token needs
 `VM.Allocate`, `VM.Clone`, `VM.Config.*`, `VM.PowerMgmt`, `VM.Console`,
 `VM.Audit`, `VM.Migrate`, `Datastore.AllocateSpace`,
 `Datastore.AllocateTemplate`, `Datastore.Audit` and `Sys.Audit`.
@@ -415,7 +453,8 @@ flags, `connect_node` without ssh.
 
 Phase 5 is optional: host devices (PCI, USB, mdev), SDN backed virtual
 networks, snapshots (Ravada has none today; Proxmox makes them cheap), and a
-noVNC console through `vncwebsocket`.
+noVNC console through `vncwebsocket`. All five phases are implemented in
+this tree, see Implementation Status above.
 
 A rough size for phases 0 to 4 is 2,500 to 3,500 lines of new Perl plus about
 300 lines of core edits, against 2,200 lines for the Void backend and 7,700

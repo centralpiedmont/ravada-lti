@@ -878,6 +878,114 @@ sub dettach($self, $user=undef) {
     $self->_replace_with_full_clone();
 }
 
+=head2 _client_connection_status
+
+The viewer connects through the Proxmox spice proxy in the node, the
+established connections are not visible from the Ravada backend. Running
+machines are reported as connected so they are never shut down for a
+false disconnection.
+
+=cut
+
+sub _client_connection_status($self, $force=undef) {
+    return 'connected';
+}
+
+=head2 rsync
+
+Nothing to synchronize, the Proxmox API moves the disks on migration
+
+=cut
+
+sub rsync($self, @args) {
+    return;
+}
+
+sub _rsync_volumes_back($self, $node, $request=undef) {
+    return;
+}
+
+sub has_non_shared_storage($self, $node=undef) {
+    return 0;
+}
+
+sub _local_storage_volumes($self) {
+    my @local;
+    for my $vol ($self->list_volumes_info( device => 'disk' )) {
+        my ($storage) = $vol->file =~ /^([^:]+):/;
+        next if !$storage;
+        push @local, ($vol->file) if !$self->_vm->_storage_is_shared($storage);
+    }
+    return @local;
+}
+
+=head2 set_base_vm
+
+Enables or disables this base in a node of the cluster. A template can
+be cloned from any node when its disks are in shared storage, nothing
+is copied.
+
+=cut
+
+sub set_base_vm($self, %args) {
+    my $id_vm = delete $args{id_vm};
+    my $value = delete $args{value};
+    my $user  = delete $args{user};
+    my $vm    = delete $args{vm};
+    my $node  = delete $args{node};
+    my $request = delete $args{request};
+
+    confess "ERROR: Unknown arguments, valid are id_vm, value, user, node and vm "
+        .Dumper(\%args) if keys %args;
+    confess "ERROR: Supply either id_vm or vm argument"
+        if (!$id_vm && !$vm && !$node) || ($id_vm && $vm) || ($id_vm && $node)
+            || ($vm && $node);
+    confess "ERROR: user required"  if !$user;
+
+    $vm = $node if $node;
+    $vm = Ravada::VM->open($id_vm)  if !$vm;
+    die "Error: VM ".Ravada::VM::_search_name($id_vm)." not available\n"
+        if !$vm || !$vm->is_active || !$vm->vm;
+
+    $value = 1 if !defined $value;
+    my $id_request;
+    $id_request = $request->id if $request;
+    $request->status("working") if $request;
+
+    if ($vm->node eq $self->node) {
+        if (!$value) {
+            $self->remove_base($user) if $self->is_base;
+        } else {
+            $self->prepare_base($user) if !$self->is_base;
+        }
+    } elsif ($value) {
+        $self->prepare_base($user) if !$self->is_base;
+        my @local = $self->_local_storage_volumes();
+        die "Error: base ".$self->name." has volumes in local storage: "
+            .join(", ", @local).". It can not be cloned from node ".$vm->node
+            .", move the disks to a shared storage.\n" if @local;
+        $self->_check_all_parents_in_node($vm);
+    }
+    $self->_set_base_vm_db($vm->id, $value, $id_request);
+    return $self->_set_base_vm_db($vm->id, $value);
+}
+
+=head2 expose
+
+Port exposure is done with NAT rules in the hypervisor, it is not
+available for Proxmox machines. They are reachable through the bridge.
+
+=cut
+
+sub expose($self, @args) {
+    die "Error: exposing ports is not available for Proxmox virtual machines,"
+        ." they are reachable through the bridge network.\n";
+}
+
+sub open_exposed_ports($self, $remote_ip=undef) {
+    return;
+}
+
 sub migrate($self, $node, $request=undef) {
     my $api = $self->_api;
     my $target = $node->node;
@@ -1142,8 +1250,38 @@ sub add_config_node($self, $path, $content, $data) {
     return;
 }
 
+our %HOSTDEV_MAX = ( hostpci => 15, usb => 4 );
+
+sub _hostdev_key($path) {
+    my ($prefix) = $path =~ m{^/?(hostpci|usb)$};
+    return $prefix;
+}
+
+sub _hostdev_same($a, $b) {
+    my ($id_a) = split /,/, $a;
+    my ($id_b) = split /,/, $b;
+    return $id_a eq $id_b;
+}
+
 sub add_config_unique_node($self, $path, $content, $data) {
-    return $self->add_config_node($path, $content, $data);
+    my $prefix = _hostdev_key($path);
+    return $self->add_config_node($path, $content, $data) if !$prefix;
+
+    my $content_hash = $content;
+    $content_hash = decode_json($content) if !ref($content);
+    my $value = $content_hash->{$prefix};
+    confess "Error: missing $prefix in ".Dumper($content_hash) if !defined $value;
+
+    for my $key (grep { /^$prefix\d+$/ } keys %$data) {
+        return if _hostdev_same($data->{$key}, $value);
+    }
+    for my $n (0 .. $HOSTDEV_MAX{$prefix}) {
+        my $key = "$prefix$n";
+        next if exists $data->{$key};
+        $data->{$key} = $value;
+        return;
+    }
+    die "Error: no free $prefix slot in ".$self->name."\n";
 }
 
 sub set_config_node($self, $path, $content, $data) {
@@ -1154,6 +1292,14 @@ sub set_config_node($self, $path, $content, $data) {
 sub remove_config_node($self, $path, $content, $data) {
     my $content_hash = $content;
     $content_hash = decode_json($content) if !ref($content);
+    my $prefix = _hostdev_key($path);
+    if ($prefix) {
+        my $value = $content_hash->{$prefix};
+        for my $key (grep { /^$prefix\d+$/ } keys %$data) {
+            delete $data->{$key} if defined $value && _hostdev_same($data->{$key}, $value);
+        }
+        return;
+    }
     my ($found, $parent, $last) = _config_walk($data, $path);
     return if !ref($parent);
     if (ref($found) eq 'HASH') {
@@ -1170,7 +1316,58 @@ sub change_config_attribute($self, $path, $content, $data) {
 sub change_namespace { }
 sub remove_namespace { }
 
-sub can_host_devices { return 0 }
+sub can_host_devices { return 1 }
+
+=head2 list_snapshots
+
+Returns the snapshots of the virtual machine
+
+=cut
+
+sub list_snapshots($self) {
+    my $list = $self->_api->get($self->_path('/snapshot'));
+    return grep { $_->{name} ne 'current' } @$list;
+}
+
+=head2 create_snapshot
+
+Creates a snapshot of the virtual machine
+
+    $domain->create_snapshot($name, $description, $vmstate);
+
+=cut
+
+sub create_snapshot($self, $name, $description='', $vmstate=0) {
+    die "Error: invalid snapshot name '$name'\n" if $name !~ /^[a-zA-Z][a-zA-Z0-9_\-]*$/;
+    my %params = ( snapname => $name, description => $description );
+    $params{vmstate} = 1 if $vmstate;
+    $self->_post('/snapshot', \%params);
+}
+
+=head2 remove_snapshot
+
+Removes a snapshot
+
+=cut
+
+sub remove_snapshot($self, $name) {
+    my $upid = $self->_api->delete($self->_path("/snapshot/$name"));
+    $self->_wait($upid);
+}
+
+=head2 rollback_snapshot
+
+Restores the virtual machine to a snapshot. It is shut down first.
+
+=cut
+
+sub rollback_snapshot($self, $name, $start=0) {
+    $self->_do_force_shutdown() if $self->is_active;
+    my %params;
+    $params{start} = 1 if $start;
+    $self->_post("/snapshot/$name/rollback", \%params);
+    $self->_refresh_config();
+}
 
 sub remove_host_devices($self, @) {
     my $config = $self->pve_config(1);

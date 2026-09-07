@@ -104,30 +104,82 @@ sub _parse_net($value) {
     return ( model => $model, mac => $mac, %$net );
 }
 
+sub _virtual_network_names($self) {
+    my %names;
+    my $id_vm = $self->_data('id_vm') or return \%names;
+    my $sth = $self->_dbh->prepare(
+        "SELECT name, bridge, forward_mode FROM virtual_networks WHERE id_vm=?"
+    );
+    $sth->execute($id_vm);
+    while (my ($name, $bridge, $mode) = $sth->fetchrow) {
+        next if !$bridge || ($mode or '') eq 'bridge';
+        $names{$bridge} = $name;
+    }
+    $sth->finish;
+    return \%names;
+}
+
 sub _get_controller_network($self) {
     my $config = $self->pve_config();
+    my $vnets = $self->_virtual_network_names();
     my @networks;
     my $n = 0;
     for my $key (sort keys %$config) {
         next if $key !~ /^net(\d+)$/;
         my %net = _parse_net($config->{$key});
         my $bridge = ($net{bridge} or '');
+        my $type = 'bridge';
+        my $name = $bridge;
+        if (exists $vnets->{$bridge}) {
+            $type = 'nat';
+            $name = $vnets->{$bridge};
+        }
         push @networks, {
             _key => $key
             ,n_order => $n++
             ,driver => $net{model}
             ,hwaddr => $net{mac}
-            ,type => 'bridge'
+            ,type => $type
             ,bridge => $bridge
-            ,name => $bridge
-            ,_name => $bridge
-            ,network => $bridge
+            ,name => $name
+            ,_name => $name
+            ,network => $name
             ,address => ''
             ,_can_edit => 1
             ,_can_remove => 1
         };
     }
     return @networks;
+}
+
+=head2 vnc_proxy_data
+
+Requests a VNC ticket to the Proxmox API for the browser console
+
+=cut
+
+sub vnc_proxy_data($self) {
+    my $vmid = $self->vmid or confess "Error: unknown vmid for ".$self->name;
+    my $node = $self->node or confess "Error: unknown node for ".$self->name;
+    return $self->_api_client->post("/nodes/$node/qemu/$vmid/vncproxy"
+        , { websocket => 1, 'generate-password' => 0 });
+}
+
+=head2 console_websocket
+
+Returns the websocket url, the headers and the TLS options to relay a
+noVNC client to the Proxmox console of this machine.
+
+=cut
+
+sub console_websocket($self) {
+    my $data = $self->vnc_proxy_data();
+    my $api = $self->_api_client;
+    my $path = "/nodes/".$self->node."/qemu/".$self->vmid."/vncwebsocket";
+    my $url = $api->websocket_url($path, { port => $data->{port}, vncticket => $data->{ticket} });
+    my %options = ( insecure => $api->insecure );
+    $options{ca} = $api->ca if $api->ca;
+    return ($url, $api->auth_headers('GET'), \%options);
 }
 
 =head2 get_driver

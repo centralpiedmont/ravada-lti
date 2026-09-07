@@ -78,6 +78,8 @@ our %VALID_CONFIG = (
         ,bridge => undef
         ,insecure => undef
         ,ca => undef
+        ,sdn_zone => undef
+        ,display_host => undef
     }
     ,db => {user => undef, password => undef,  hostname => undef, host => undef, db => undef}
     ,ldap => { admin_user => { dn => undef, password => undef }
@@ -3524,11 +3526,15 @@ sub _check_vms {
     my @vm;
     eval { @vm = @{$self->vm} };
     for my $n ( 0 .. $#vm ) {
-        if ($vm[$n] && ref $vm[$n] =~ /KVM/i) {
-            if (!$vm[$n]->is_alive) {
-                warn "$vm[$n] dead" if $DEBUG;
-                $vm[$n] = $self->_create_vm_kvm();
-            }
+        next if !$vm[$n] || !$vm[$n]->is_local;
+        next if ref($vm[$n]) !~ /KVM|Proxmox/i;
+        if (!$vm[$n]->is_alive) {
+            warn "$vm[$n] dead" if $DEBUG;
+            my $type = $vm[$n]->type;
+            my $vms;
+            eval { $vms = $self->_create_vm($type) };
+            warn $@ if $@;
+            $vm[$n] = $vms->[0] if $vms && $vms->[0];
         }
     }
 }

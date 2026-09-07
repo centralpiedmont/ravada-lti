@@ -52,11 +52,17 @@ has 'vm' => (
     ,lazy => 1
 );
 
+use Socket qw(inet_aton inet_ntoa);
+
+# the role attribute would override a plain method, so it is redefined
+# here with a builder that checks the SDN zone
 has 'has_networking' => (
     isa => 'Bool'
     , is => 'ro'
-    , default => 0
+    , lazy => 1
+    , builder => '_build_has_networking'
 );
+
 
 our $CONNECTOR = \$Ravada::CONNECTOR;
 
@@ -87,16 +93,27 @@ sub new_from_config($class, $config=undef) {
     my $vm = $class->new();
     $vm->_store_connection_args(\%conn);
 
-    for my $node (@{ $conn{nodes} or [] }) {
-        next if $conn{node} && $node eq $conn{node};
-        my $other = $class->new( host => $node );
-        $other->_store_connection_args(\%conn);
-    }
-
     my $client;
     eval { $client = $vm->vm };
     warn $@ if $@;
     return if !$client;
+
+    my @nodes;
+    my $nodes = $conn{nodes};
+    if (defined $nodes && !ref($nodes) && $nodes =~ /^(all|\*)$/i) {
+        my $list = $client->get('/nodes');
+        @nodes = map { $_->{node} } @$list;
+    } elsif (ref($nodes) eq 'ARRAY') {
+        @nodes = @$nodes;
+    } elsif (defined $nodes) {
+        @nodes = split /\s*,\s*/, $nodes;
+    }
+    for my $node (@nodes) {
+        next if !$node || $node eq $vm->node;
+        my $other = $class->new( host => $node );
+        $other->_store_connection_args(\%conn);
+    }
+
     return $vm;
 }
 
@@ -104,6 +121,7 @@ sub _store_connection_args($self, $conn) {
     return if !$self->store;
     my %store = %$conn;
     delete $store{nodes};
+    delete $store{node} if !$self->is_local;
     $self->_data('connection_args' => JSON::XS->new->canonical->encode(\%store));
     my $default = $self->_data('default_storage');
     if ($conn->{storage} && (!$default || $default eq 'default')) {
@@ -168,6 +186,12 @@ sub _connect($self) {
         $self->_data('cached_down' => time) if $self->store && !$self->is_local;
         return;
     }
+    # nodes added from the frontend have no connection settings stored yet
+    if ($self->store) {
+        my $stored;
+        eval { $stored = $self->_data('connection_args') };
+        $self->_store_connection_args($conn) if !$stored;
+    }
     return $client;
 }
 
@@ -215,7 +239,13 @@ sub _store_mac_address($self, $force=0) {
     return;
 }
 
+our %PSEUDO_COMMAND = map { $_ => 1 } qw(pve-list-pci pve-list-usb pve-list-mdev);
+
 sub run_command($self, @command) {
+    my ($command0) = @command;
+    if (defined $command0 && $command0 =~ m{(^|/)(pve-list-(pci|usb|mdev))$}) {
+        return ($self->_list_hardware($3), '');
+    }
     return $self->_run_command_local(@command) if $self->is_local;
     my $ssh;
     eval { $ssh = $self->_ssh };
@@ -227,6 +257,65 @@ sub run_command($self, @command) {
 }
 
 sub _fetch_dir_cert { return '' }
+
+sub _which($self, $command) {
+    return $command if $PSEUDO_COMMAND{$command};
+    return Ravada::VM::_which($self, $command);
+}
+
+=head2 _list_hardware
+
+Lists the PCI, USB or mediated devices of the node in a text format
+similar to lspci and lsusb, used by the host device templates.
+
+=cut
+
+sub _list_hardware($self, $type) {
+    my $node = $self->node;
+    my @lines;
+    if ($type eq 'pci' || $type eq 'mdev') {
+        my $list = $self->vm->get("/nodes/$node/hardware/pci");
+        for my $dev (@$list) {
+            my $class = ($dev->{class} or '');
+            next if $class =~ /^0x06/;
+            my $vendor = ($dev->{vendor} or '');
+            my $device = ($dev->{device} or '');
+            s/^0x// for ($vendor, $device);
+            if ($type eq 'pci') {
+                push @lines, join(" ", $dev->{id}, "$vendor:$device"
+                    , ($dev->{vendor_name} or ''), ($dev->{device_name} or ''));
+                next;
+            }
+            next if !$dev->{mdev};
+            my $types = eval { $self->vm->get("/nodes/$node/hardware/pci/$dev->{id}/mdev") };
+            next if !$types;
+            for my $mdev (@$types) {
+                next if defined $mdev->{available} && !$mdev->{available};
+                push @lines, join(" ", $dev->{id}, "mdev=".$mdev->{type}
+                    , ($mdev->{name} or ''), "available=".($mdev->{available} or 0));
+            }
+        }
+    } elsif ($type eq 'usb') {
+        my $list = $self->vm->get("/nodes/$node/hardware/usb");
+        for my $dev (@$list) {
+            next if defined $dev->{class} && $dev->{class} == 9;
+            push @lines, sprintf("Bus %03d Device %03d: ID %s:%s %s %s"
+                , $dev->{busnum}, $dev->{devnum}, $dev->{vendid}, $dev->{prodid}
+                , ($dev->{manufacturer} or ''), ($dev->{product} or ''));
+        }
+    }
+    return join("\n", @lines)."\n";
+}
+
+=head2 iptables_list
+
+Ravada manages no firewall rules in Proxmox nodes, returns an empty list
+
+=cut
+
+sub iptables_list($self) {
+    return {};
+}
 
 sub get_library_version($self) {
     my $data = $self->_cached('version', sub { $self->vm->get('/version') });
@@ -315,10 +404,6 @@ sub get_cpu_model_names($self, $arch='x86_64') {
 
 sub can_list_cpu_models { return 1 }
 
-sub list_host_devices($self) {
-    return ();
-}
-
 ##########################################################################
 #
 # networking
@@ -348,9 +433,89 @@ sub _list_qemu_bridges($self) {
     return ();
 }
 
+=head2 has_networking
+
+Virtual networks are available when a SDN zone is configured in the
+C<sdn_zone> setting of the proxmox config section.
+
+=cut
+
+sub _build_has_networking($self) {
+    return 1 if $self->_sdn_zone;
+    return 0;
+}
+
+sub _sdn_zone($self) {
+    return ($self->_conn->{sdn_zone} or '');
+}
+
+sub _vnets($self) {
+    return [] if !$self->_sdn_zone;
+    my $zone = $self->_sdn_zone;
+    # not cached, networks are changed from other objects and processes
+    my $list = $self->vm->get('/cluster/sdn/vnets');
+    return [ grep { ($_->{zone} or '') eq $zone } @$list ];
+}
+
+sub _subnets($self, $vnet) {
+    return $self->vm->get("/cluster/sdn/vnets/$vnet/subnets");
+}
+
+sub _prefix_to_netmask($prefix) {
+    return inet_ntoa(pack("N", $prefix ? (0xFFFFFFFF << (32 - $prefix)) & 0xFFFFFFFF : 0));
+}
+
+sub _netmask_to_prefix($netmask) {
+    return 24 if !$netmask;
+    return $netmask if $netmask =~ /^\d+$/;
+    my $bits = unpack("B32", inet_aton($netmask));
+    return length(($bits =~ /^(1*)/)[0]);
+}
+
+sub _parse_dhcp_range($range) {
+    return (undef, undef) if !$range;
+    $range = $range->[0] if ref($range) eq 'ARRAY';
+    return (undef, undef) if !$range;
+    my ($start) = $range =~ /start-address=([^,]+)/;
+    my ($end) = $range =~ /end-address=([^,]+)/;
+    return ($start, $end);
+}
+
+sub _vnet_network($self, $vnet) {
+    my $name = $vnet->{vnet};
+    my $subnets = $self->_subnets($name);
+    my ($subnet) = @$subnets;
+    my %net = (
+        name => ($vnet->{alias} && $vnet->{alias} =~ /^[a-zA-Z0-9_\-]+$/ ? $vnet->{alias} : $name)
+        ,bridge => $name
+        ,internal_id => $name
+        ,is_active => 1
+        ,autostart => 1
+        ,forward_mode => 'none'
+        ,ip_address => ''
+        ,ip_netmask => ''
+        ,id_vm => $self->id
+    );
+    if ($subnet) {
+        my ($ip, $prefix) = ($subnet->{cidr} or '') =~ m{^(.*)/(\d+)$};
+        $net{ip_address} = ($subnet->{gateway} or $ip or '');
+        $net{ip_netmask} = _prefix_to_netmask($prefix) if defined $prefix;
+        $net{forward_mode} = 'nat' if $subnet->{snat};
+        my ($start, $end) = _parse_dhcp_range($subnet->{'dhcp-range'});
+        $net{dhcp_start} = $start if $start;
+        $net{dhcp_end} = $end if $end;
+    }
+    return \%net;
+}
+
 sub list_virtual_networks($self) {
     my @list;
-    my $n = 0;
+    if ($self->_sdn_zone) {
+        for my $vnet (@{$self->_vnets}) {
+            push @list, ($self->_vnet_network($vnet));
+        }
+        return @list;
+    }
     for my $bridge (@{$self->_bridges}) {
         my $address = ($bridge->{address} or '');
         ($address) = $bridge->{cidr} =~ m{^(.*)/} if !$address && $bridge->{cidr};
@@ -371,22 +536,139 @@ sub list_virtual_networks($self) {
 
 sub list_routes { return () }
 
-sub _is_ip_nat($self, $ip) { return 0 }
+sub _is_ip_nat($self, $ip) {
+    return 0 if !$self->_sdn_zone || !$ip;
+    my $n_ip = unpack("N", inet_aton($ip));
+    for my $vnet (@{$self->_vnets}) {
+        for my $subnet (@{$self->_subnets($vnet->{vnet})}) {
+            next if !$subnet->{snat};
+            my ($net, $prefix) = ($subnet->{cidr} or '') =~ m{^(.*)/(\d+)$};
+            next if !$net;
+            my $mask = $prefix ? (0xFFFFFFFF << (32 - $prefix)) & 0xFFFFFFFF : 0;
+            return 1 if ((unpack("N", inet_aton($net)) & $mask) == ($n_ip & $mask));
+        }
+    }
+    return 0;
+}
+
+sub _vnet_name($name) {
+    my $vnet = lc($name);
+    $vnet =~ s/[^a-z0-9]//g;
+    $vnet = "n$vnet" if $vnet !~ /^[a-z]/;
+    return substr($vnet, 0, 8);
+}
+
+sub _find_vnet($self, $name) {
+    for my $vnet (@{$self->_vnets}) {
+        return $vnet if $vnet->{vnet} eq $name
+            || ($vnet->{alias} && $vnet->{alias} eq $name)
+            || $vnet->{vnet} eq _vnet_name($name);
+    }
+    return;
+}
+
+sub _apply_sdn($self) {
+    my $upid = $self->vm->put('/cluster/sdn');
+    $self->vm->wait_task($self->node, $upid) if $upid;
+    $self->_clear_cache();
+}
 
 sub new_network($self, $name='net') {
-    die "Error: virtual networks are managed in Proxmox\n";
+    die "Error: no SDN zone configured for virtual networks\n" if !$self->_sdn_zone;
+    my @networks = $self->list_virtual_networks();
+    my %used_name = map { $_->{name} => 1, $_->{bridge} => 1 } @networks;
+    my %used_ip = map { $_->{ip_address} => 1 } @networks;
+    my $n = 0;
+    my $new_name;
+    for ( 0 .. 255 ) {
+        $new_name = _vnet_name($name.$n);
+        last if !$used_name{$new_name};
+        $n++;
+    }
+    my $ip;
+    for my $i ( 0 .. 255 ) {
+        $ip = "10.$i.0.1";
+        last if !$used_ip{$ip};
+    }
+    return {
+        name => $new_name
+        ,bridge => $new_name
+        ,ip_address => $ip
+        ,ip_netmask => '255.255.255.0'
+    };
 }
 
 sub create_network($self, $data, $id_owner=undef, $request=undef) {
-    die "Error: virtual networks are managed in Proxmox\n";
+    my $zone = $self->_sdn_zone
+        or die "Error: no SDN zone configured for virtual networks\n";
+    my $name = _vnet_name($data->{name});
+    die "Error: network $data->{name} already exists\n" if $self->_find_vnet($name);
+
+    my $api = $self->vm;
+    $api->post('/cluster/sdn/vnets', { vnet => $name, zone => $zone, alias => $data->{name} });
+
+    my $ip = $data->{ip_address} or die "Error: missing ip address";
+    my $prefix = _netmask_to_prefix($data->{ip_netmask});
+    my $mask = $prefix ? (0xFFFFFFFF << (32 - $prefix)) & 0xFFFFFFFF : 0;
+    my $network = inet_ntoa(pack("N", unpack("N", inet_aton($ip)) & $mask));
+    my %subnet = (
+        subnet => "$network/$prefix"
+        ,type => 'subnet'
+        ,gateway => $ip
+        ,snat => ( ($data->{forward_mode} or 'nat') eq 'nat' ? 1 : 0 )
+    );
+    $subnet{'dhcp-range'} = "start-address=$data->{dhcp_start},end-address=$data->{dhcp_end}"
+        if $data->{dhcp_start} && $data->{dhcp_end};
+    eval { $api->post("/cluster/sdn/vnets/$name/subnets", \%subnet) };
+    if ($@) {
+        my $err = $@;
+        eval { $api->delete("/cluster/sdn/vnets/$name") };
+        die $err;
+    }
+    $self->_apply_sdn();
+
+    $data->{internal_id} = $name;
+    $data->{bridge} = $name;
+    $data->{is_active} = 1;
+    $data->{autostart} = 1;
+    return $data;
 }
 
 sub remove_network($self, $name) {
-    die "Error: virtual networks are managed in Proxmox\n";
+    my $vnet = $self->_find_vnet($name) or return;
+    my $api = $self->vm;
+    for my $subnet (@{$self->_subnets($vnet->{vnet})}) {
+        $api->delete("/cluster/sdn/vnets/$vnet->{vnet}/subnets/$subnet->{subnet}");
+    }
+    $api->delete("/cluster/sdn/vnets/$vnet->{vnet}");
+    $self->_apply_sdn();
 }
 
 sub change_network($self, $data) {
-    die "Error: virtual networks are managed in Proxmox\n";
+    my $id = ($data->{internal_id} or $data->{bridge} or $data->{name})
+        or confess "Error: missing internal_id ".Dumper($data);
+    my $vnet = $self->_find_vnet($id) or die "Error: network $id not found\n";
+    my ($current) = $self->_vnet_network($vnet);
+
+    die "Error: network can not be renamed\n"
+        if $data->{name} && $data->{name} ne $current->{name}
+            && $data->{name} ne $vnet->{vnet};
+
+    my ($subnet) = @{$self->_subnets($vnet->{vnet})};
+    my %params;
+    if ($subnet) {
+        $params{snat} = ($data->{forward_mode} eq 'nat' ? 1 : 0)
+            if $data->{forward_mode} && $data->{forward_mode} ne $current->{forward_mode};
+        my $start = ($data->{dhcp_start} or $current->{dhcp_start});
+        my $end = ($data->{dhcp_end} or $current->{dhcp_end});
+        $params{'dhcp-range'} = "start-address=$start,end-address=$end"
+            if $start && $end && ( ($data->{dhcp_start} or '') ne ($current->{dhcp_start} or '')
+                || ($data->{dhcp_end} or '') ne ($current->{dhcp_end} or '') );
+    }
+    return 0 if !keys %params;
+    $self->vm->put("/cluster/sdn/vnets/$vnet->{vnet}/subnets/$subnet->{subnet}", \%params);
+    $self->_apply_sdn();
+    return 1;
 }
 
 ##########################################################################
@@ -503,6 +785,7 @@ sub _volume_size($self, $volid) {
 }
 
 sub file_exists($self, $file) {
+    return 1 if $PSEUDO_COMMAND{$file};
     return -e $file if $file =~ m{^/};
     my ($storage) = $file =~ /^([^:]+):/;
     return 0 if !$storage;
@@ -818,6 +1101,29 @@ sub import_domain($self, $name, $user, $spinoff=undef) {
     return $domain;
 }
 
+=head2 search_base
+
+Returns a base domain wherever it is in the cluster. Templates in
+shared storage can be cloned from any node.
+
+=cut
+
+sub search_base($self, $id_base) {
+    my $base = $self->search_domain_by_id($id_base);
+    return $base if $base;
+
+    my $sth = $$CONNECTOR->dbh->prepare(
+        "SELECT name, internal_id FROM domains WHERE id=?"
+    );
+    $sth->execute($id_base);
+    my ($name, $vmid) = $sth->fetchrow;
+    $sth->finish;
+    return if !$name || !$vmid;
+
+    my $node = $self->_node_of_vmid($vmid) or return;
+    return $self->_new_domain($vmid, $node, $name);
+}
+
 sub _next_vmid($self) {
     my $vmid = $self->vm->get('/cluster/nextid');
     return $vmid + 0;
@@ -866,8 +1172,8 @@ sub create_domain($self, %args) {
 
     my $domain;
     if ($id_base) {
-        my $base = $self->search_domain_by_id($id_base)
-            or confess "Error: I can't find base domain id=$id_base";
+        my $base = $self->search_base($id_base)
+            or confess "Error: I can't find base domain id=$id_base in the cluster";
         my %params = ( newid => $vmid, name => $pve_name );
         $params{description} = $description if $description;
         $params{target} = $self->node if $base->node ne $self->node;
