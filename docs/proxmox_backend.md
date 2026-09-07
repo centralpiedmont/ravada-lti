@@ -359,12 +359,46 @@ for KVM.
 
 The suite iterates `vm_names()` from `t/lib/Test/Ravada.pm:289`, so adding
 `Proxmox` to `%ARG_CREATE_DOM` runs every `t/vm/*.t` and `t/*.t` loop
-against the new backend. CI has no Proxmox cluster, so the API client should
-have a mock mode (a hash of routes to canned JSON, or a tiny Mojolicious app
-started by the test) that the backend uses when `ravada.conf` points at
-`http://localhost:<port>`. Integration runs against a real single node PVE
-with `local` (dir, qcow2) storage cover linked clones; LVM thin or ZFS covers
-the non file case.
+against the new backend. A self hosted GitHub Actions runner with network
+access to a Proxmox server is available for this fork, so integration tests
+can run against a real cluster on every pull request rather than only against
+a mock.
+
+The existing workflow (`.github/workflows/github-action-test.yml`) runs on
+`ubuntu-latest`, installs MariaDB and a 389 directory server, and runs the
+Void backend tests. A second job, or a second workflow, should target the
+self hosted runner (`runs-on: [self-hosted, proxmox]` or whatever label the
+runner carries) and:
+
+- write `/etc/ravada.conf` with `vm: [Proxmox]` and a `proxmox:` section
+  holding the API URL, node name, storage ID and bridge, taken from repository
+  secrets and variables (`PROXMOX_API_URL`, `PROXMOX_TOKEN_ID`,
+  `PROXMOX_TOKEN_SECRET`, `PROXMOX_NODE`, `PROXMOX_STORAGE`,
+  `PROXMOX_BRIDGE`), never from the tree;
+- use an API token scoped to a dedicated resource pool (for example
+  `ravada-ci`) with `PVEVMAdmin` plus `Datastore.AllocateSpace`,
+  `Datastore.AllocateTemplate`, `Datastore.Audit` and `Sys.Audit` on the
+  test storage and node, so a runaway test cannot touch production VMs;
+- keep a small ISO such as Alpine already present on the test storage, or
+  let the first run fetch it through `download-url`, which the test harness
+  already tolerates through `$Ravada::VM::KVM::VERIFY_ISO = 0` style flags;
+- create test machines with the harness's `tst_` name prefix and a
+  reserved VMID range (`GET /cluster/nextid` accepts a lower bound), and add
+  a cleanup step in `Test::Ravada::_remove_old_domains_vm` that deletes any
+  VM or template in the pool whose name matches the prefix, running both
+  before and after the job so a failed run never leaks machines;
+- run the phase appropriate subset first (`t/vm/60_new_args.t`,
+  `t/30_request.t`, then `t/vm/*.t`) with `prove -l`, and gate the job on
+  the label so forks without the runner still get the Void job;
+- use dir backed qcow2 storage (`local`) for the linked clone path, and a
+  second job or matrix entry on LVM thin or ZFS once phase 2 lands, since
+  those exercise the non file storage code.
+
+A mocked API client is still worth having for the fast unit path on
+`ubuntu-latest`, since it lets `t/00_libs.t`, `t/pod_coverage.t` and
+`t/critic.t` load the new modules and keeps the request dispatch tests
+runnable without network access. It can be a hash of routes to canned JSON
+selected when the configured URL starts with `mock://`.
 
 ## The Alternative: Libvirt On Proxmox Nodes
 
